@@ -15,6 +15,7 @@ This repository contains the source code for the command-line tool that powers t
   * [Prerequisites](#prerequisites)
   * [Installation](#installation)
 * [Usage](#usage)
+* [Training Your Own Model](#training-your-own-model)
 * [License](#license)
 
 ---
@@ -85,6 +86,71 @@ python main.py \
     --model-path "resources/best_ResInceptionNet_model0.8811.pth" \
     --base-font "resources/arial.ttf"
 ```
+
+---
+
+### Training Your Own Model
+
+You can retrain the character classification model on EMNIST data using the provided scripts. The model is trained at **64×64** input resolution for best results.
+
+#### 1. Install requirements
+
+```bash
+pip install -r requirements.txt
+```
+
+#### 2. One-command full pipeline
+
+**Linux / macOS:**
+```bash
+bash scripts/run_all.sh
+```
+
+**Windows:**
+```bat
+scripts\run_all.bat
+```
+
+#### 3. Step-by-step
+
+| Step | Script | Description |
+|------|--------|-------------|
+| 1 | `scripts/download_data.py` | Downloads EMNIST ByClass, filters to A-Z/a-z (52 classes), resizes to 64×64, saves `.pt` files |
+| 2 | `scripts/train.py` | Trains `ResInceptionNet` with augmentation, saves best model and training log |
+| 3 | `scripts/evaluate.py` | Reports top-1 accuracy, per-class breakdown, and saves a confusion matrix |
+
+Run each step individually:
+```bash
+python scripts/download_data.py --output-dir data/
+python scripts/train.py --epochs 60 --batch-size 128 --output-dir resources/
+python scripts/evaluate.py --model-path resources/best_model.pth
+```
+
+To resume an interrupted training run:
+```bash
+python scripts/train.py --resume
+```
+
+#### 4. Tips for best input image quality
+
+- Scan at **300 DPI** or higher for clearest results
+- Use **white paper** and **dark ink** (black or dark blue)
+- Avoid shadows, folds, or reflections on the paper
+- Write each character clearly within its designated box
+- Ensure good contrast between ink and background
+
+#### 5. Using the new trained model
+
+Pass `--model-path` to `main.py` to use your retrained model:
+
+```bash
+python main.py \
+    --input-image "examples/good_example.jpg" \
+    --output-path "output/MyFont.ttf" \
+    --model-path "resources/best_model.pth"
+```
+
+> **Note:** The model must be retrained at 64×64 input for best results. The existing pre-trained `.pth` file was trained at 28×28 and will need to be replaced after running `scripts/train.py`.
 
 ---
 

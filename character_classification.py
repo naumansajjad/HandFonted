@@ -1,9 +1,13 @@
+import json
+
 import torch
 from torch import nn
 from torchvision import transforms
+import torchvision.transforms.functional as TF
 from PIL import Image
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+from skimage.morphology import skeletonize as sk_skeletonize
 import cv2
 import os
 
@@ -226,6 +230,16 @@ def assign_classes(probabilities):
 
     return assigned_sample_indices, assigned_probabilities, assigned_class_indices
 
+def predict_with_tta(model, image_tensors_list, angles=(-7, 0, 7)):
+    """Average softmax predictions over rotated versions of each image (Test-Time Augmentation)."""
+    all_preds = []
+    for angle in angles:
+        rotated = torch.stack([TF.rotate(t, angle) for t in image_tensors_list])
+        with torch.inference_mode():
+            out = model(rotated)
+            all_preds.append(torch.softmax(out, dim=1))
+    return torch.stack(all_preds).mean(dim=0)
+
 def classify_characters(list_of_char_images, model_path="", OUTPUT_PATH=""):
     """
     Predict the class of each character image using a pre-trained model.
@@ -237,44 +251,67 @@ def classify_characters(list_of_char_images, model_path="", OUTPUT_PATH=""):
     """
     orignal_images = []
     image_tensors = []
+
+    # Load normalization stats from file if available
+    # These are fallback defaults used when data/norm_stats.json is unavailable (update after retraining on 64x64)
+    _mean, _std = (0.1751,), (0.3332,)
+    _norm_stats_path = os.path.join("data", "norm_stats.json")
+    if os.path.exists(_norm_stats_path):
+        with open(_norm_stats_path, "r") as _f:
+            _stats = json.load(_f)
+        _mean = (_stats["mean"],)
+        _std = (_stats["std"],)
+
     transform = transforms.Compose([
-        transforms.Resize((28, 28)),
+        transforms.Resize((64, 64)),   # Increased from 28x28 for better discriminability
         transforms.ToTensor(),
-        transforms.Normalize((0.1751,), (0.3332,))
+        transforms.Normalize(_mean, _std)  # Fallback defaults; overridden by norm_stats.json when available
     ])
+
+    CONFIDENCE_THRESHOLD = 0.55
+
     for img_arr in list_of_char_images:
 
         gray = cv2.cvtColor(img_arr, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        denoised = cv2.fastNlMeansDenoising(gray, h=10, templateWindowSize=7, searchWindowSize=21)
+        blurred = cv2.GaussianBlur(denoised, (3, 3), 0)
         thresh = cv2.adaptiveThreshold(
             blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 5
         )
-        image = pad_image_to_square(thresh,extra_padding_amount=1)
+        # Skeletonize to normalize stroke width across writers
+        binary_bool = thresh > 0
+        skeleton = sk_skeletonize(binary_bool).astype(np.uint8) * 255
+        image = pad_image_to_square(skeleton, extra_padding_amount=4)
         image_tensor = transform(Image.fromarray(image))
         image_tensors.append(image_tensor)
-
         orignal_images.append(thresh)
 
     classes = ['A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z','a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','q','r','s','t','u','v','w','x','y','z']
     if image_tensors:
-        batch_tensor = torch.stack(image_tensors)
-
         model = ResInceptionNet(num_classes=52)
         model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
-
         model.eval()
-        with torch.inference_mode():
-            outputs = model(batch_tensor)
-            probabilities = torch.softmax(outputs, dim=1)
+
+        probabilities_tensor = predict_with_tta(model, image_tensors)
+        probabilities = probabilities_tensor.detach().numpy()
+
         orignal_indices, confidence, predicted_classes = assign_classes(probabilities)
 
-        images = [orignal_images[i] for i in orignal_indices.tolist()]
-        predicted_labels = [classes[i] for i in predicted_classes.tolist()]
+        images = []
+        predicted_labels = []
+        for idx, conf, cls in zip(orignal_indices.tolist(), confidence.tolist(), predicted_classes.tolist()):
+            if conf < CONFIDENCE_THRESHOLD:
+                print(f"[WARN] Low confidence ({conf:.2f}) for predicted '{classes[cls]}' — skipping")
+                continue
+            images.append(orignal_images[idx])
+            predicted_labels.append(classes[cls])
 
         if OUTPUT_PATH:
             os.makedirs(OUTPUT_PATH, exist_ok=True)
-            for img_index, confidence, prediction in zip(orignal_indices, confidence, predicted_classes):
-                save_path = os.path.join(OUTPUT_PATH, f"char_{classes[prediction.item()]}_{confidence.item():3f}.png")
+            for img_index, conf, prediction in zip(orignal_indices, confidence, predicted_classes):
+                if conf.item() < CONFIDENCE_THRESHOLD:
+                    continue
+                save_path = os.path.join(OUTPUT_PATH, f"char_{classes[prediction.item()]}_{conf.item():3f}.png")
                 img = orignal_images[img_index]
                 cv2.imwrite(save_path, img)
 
