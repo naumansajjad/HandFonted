@@ -4,14 +4,16 @@ import os
 def segment_characters(
     image_path,
     target_dim=1024,
-    padding=1,
-    block_size=15,
-    C=5,
+    padding=4,
+    block_size=21,
+    C=8,
     use_morph_open=True,
-    open_kernel_size=(2, 2),
+    open_kernel_size=(3, 3),
+    use_morph_close=True,
+    close_kernel_size=(2, 2),
     dilation_iterations=1,
     dilation_kernel_size=(2, 2),
-    min_area_threshold=5,
+    min_area_threshold=50,
     dot_max_area=60,
     max_dot_gap_ratio=0.8,
     horizontal_tolerance_ratio=0.3
@@ -46,15 +48,20 @@ def segment_characters(
     image = cv2.resize(image, (w_new, h_new), interpolation=cv2.INTER_LINEAR)
 
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    # Step 1: Non-local means denoising to remove scan/camera grain
+    denoised = cv2.fastNlMeansDenoising(gray, h=10, templateWindowSize=7, searchWindowSize=21)
+    blurred = cv2.GaussianBlur(denoised, (5, 5), 0)
 
     thresh = cv2.adaptiveThreshold(
         blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, block_size, C
     )
 
     if use_morph_open:
-        open_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, open_kernel_size)
-        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, open_kernel)
+        open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, open_kernel_size)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, open_kernel, iterations=2)
+    if use_morph_close:
+        close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, close_kernel_size)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, close_kernel)
     dilate_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, dilation_kernel_size)
     dilated = cv2.dilate(thresh, dilate_kernel, iterations=dilation_iterations)
 
@@ -63,11 +70,18 @@ def segment_characters(
     contour_info = []
     for i, cnt in enumerate(contours):
         area = cv2.contourArea(cnt)
-        if area >= min_area_threshold:
-            x, y, w, h = cv2.boundingRect(cnt)
-            cx = x + w // 2
-            cy = y + h // 2
-            contour_info.append({'id': i, 'contour': cnt, 'area': area, 'box': (x, y, w, h), 'center': (cx, cy), 'merged': False})
+        if area < min_area_threshold:
+            continue
+        x, y, w, h = cv2.boundingRect(cnt)
+        aspect_ratio = w / float(h) if h > 0 else 0
+        # Reject implausibly shaped blobs (not characters)
+        if aspect_ratio > 5.0 or aspect_ratio < 0.1:
+            continue
+        if w < 5 or h < 5:
+            continue
+        cx = x + w // 2
+        cy = y + h // 2
+        contour_info.append({'id': i, 'contour': cnt, 'area': area, 'box': (x, y, w, h), 'center': (cx, cy), 'merged': False})
 
     potential_dots = [c for c in contour_info if c['area'] <= dot_max_area]
     potential_bodies = [c for c in contour_info if c['area'] > dot_max_area]
@@ -140,14 +154,16 @@ def segment_characters(
 def SC_main(image_file='images/test1.jpg'):
     # --- Parameters ---
     target_dimension = 1024
-    pad_amount = 1
-    block = 15
-    const_C = 5
+    pad_amount = 4
+    block = 21
+    const_C = 8
     apply_opening = True
-    opening_k_size = (2, 2)
+    opening_k_size = (3, 3)
+    apply_closing = True
+    closing_k_size = (2, 2)
     dilate_iter = 1
     dilate_k_size = (2, 2)
-    min_area = 5
+    min_area = 50
     dot_area = 60
     dot_gap_ratio = 0.8
     h_tolerance_ratio = 0.3
@@ -160,6 +176,8 @@ def SC_main(image_file='images/test1.jpg'):
         C=const_C,
         use_morph_open=apply_opening,
         open_kernel_size=opening_k_size,
+        use_morph_close=apply_closing,
+        close_kernel_size=closing_k_size,
         dilation_iterations=dilate_iter,
         dilation_kernel_size=dilate_k_size,
         min_area_threshold=min_area,
